@@ -3,15 +3,20 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 use drown_common::proto::{
     decode::DecodedPacket,
     encode::EncodedPacket,
-    packet::{C2SPacket, S2CPacket, S2CQuerySuccessResponsePacket},
+    packet::{C2SPacket, S2CPacket, S2CQuerySuccessResponsePacket, S2CQueryErrorResponsePacket},
 };
 use futures::{SinkExt, TryStreamExt};
 use once_cell::sync::Lazy;
+use parser::StatementParser;
 use tokio::{
     net::{tcp::OwnedWriteHalf, TcpListener, TcpStream},
     sync::Mutex,
 };
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
+
+mod parser;
+mod keyword;
+mod statement;
 
 #[derive(Debug)]
 struct ClientConnection {
@@ -150,6 +155,8 @@ async fn handle_socket_connection(socket: TcpStream) -> std::io::Result<()> {
                             client_connection.keep_alive_state = KeepAliveState::WaitingForRequest {
                                 response_received_at: std::time::Instant::now(),
                             };
+
+                            println!("Got KeepAliveResponse from {:?}", addr);
                         } else {
                             eprintln!(
                                 "Got KeepAliveResponse with unexpected response_to: {:?}",
@@ -161,8 +168,22 @@ async fn handle_socket_connection(socket: TcpStream) -> std::io::Result<()> {
                         eprintln!("Got unexpected KeepAliveResponse packet: {:?}", packet)
                     }
                 },
-                C2SPacket::QueryRequest(_query_request) => {
-                    // TODO: Parse the SQL query and execute it
+                C2SPacket::QueryRequest(query_request) => {
+                    let statements = match StatementParser::parse(&query_request.query) {
+                        Ok(statements) => statements,
+                        Err(err) => {
+                            let err_res = EncodedPacket::from_payload(S2CPacket::QueryResponse(Err(
+                                S2CQueryErrorResponsePacket {
+                                    error: format!("Failed to parse query: {}", err),
+                                },
+                            )));
+
+                            client_connection.send_packet(err_res).await;
+                            continue;
+                        }
+                    };
+
+                    println!("Got query request: {:?}", statements);
 
                     let res = EncodedPacket::from_payload(S2CPacket::QueryResponse(Ok(
                         S2CQuerySuccessResponsePacket {
@@ -188,7 +209,7 @@ async fn handle_socket_connection(socket: TcpStream) -> std::io::Result<()> {
 #[tokio::main]
 pub async fn main() -> std::io::Result<()> {
     // Bind a server socket
-    let listener = TcpListener::bind("127.0.0.1:6472").await.unwrap();
+    let listener = TcpListener::bind("0.0.0.0:6472").await.unwrap();
 
     println!("listening on drown://{:?}", listener.local_addr().unwrap());
 
@@ -197,3 +218,4 @@ pub async fn main() -> std::io::Result<()> {
         handle_socket_connection(socket).await.unwrap();
     }
 }
+ 

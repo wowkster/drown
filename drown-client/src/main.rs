@@ -1,7 +1,10 @@
 use drown_common::proto::decode::DecodedPacket;
 use drown_common::proto::encode::EncodedPacket;
 use drown_common::proto::packet::C2SPacket;
+use drown_common::proto::packet::C2SQueryRequestPacket;
 use drown_common::proto::packet::S2CPacket;
+use drown_common::proto::packet::S2CQueryErrorResponsePacket;
+use drown_common::proto::packet::S2CQuerySuccessResponsePacket;
 use futures::SinkExt;
 use futures::TryStreamExt;
 use std::error::Error;
@@ -30,6 +33,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let message_id = AtomicU32::new(0);
 
+    // Send query packet
+    let query_packet =
+        EncodedPacket::from_payload(C2SPacket::QueryRequest(C2SQueryRequestPacket {
+            query: "SELECT * FROM users;".to_string(),
+        }))
+        .with_id(message_id.fetch_add(1, Ordering::SeqCst));
+
+    delimited_writer
+        .send(query_packet.to_bytes())
+        .await
+        .unwrap();
+
+    // Respond to packets
+
     while let Some(msg) = delimited_reader.try_next().await.unwrap() {
         let packet = DecodedPacket::<S2CPacket>::from_bytes(msg).unwrap();
 
@@ -41,27 +58,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                 delimited_writer.send(res.to_bytes()).await.unwrap();
             }
-            S2CPacket::QueryResponse(_) => todo!(),
+            S2CPacket::QueryResponse(query_res) => match query_res {
+                Ok(S2CQuerySuccessResponsePacket { schema, data }) => {
+                    println!("Query succeeded: {:#?} {:#?}", schema, data);
+                }
+                Err(S2CQueryErrorResponsePacket { error }) => {
+                    println!("Query failed: {:#?}", error);
+                }
+            },
         }
     }
 
     Ok(())
 }
-
-// struct StatementParser;
-
-// #[derive(Debug, Error)]
-// enum StatementParseError {
-//     #[error("Invalid statement")]
-//     InvalidStatement,
-// }
-
-// impl StatementParser {
-//     fn parse(statement: &str) -> Result<(), StatementParseError> {
-//         if statement.starts_with("SELECT") {
-//             Ok(())
-//         } else {
-//             Err(StatementParseError::InvalidStatement)
-//         }
-//     }
-// }
